@@ -443,6 +443,7 @@ pub const DEFAULT_UNTRACKED_ENV: &[&str] = &[
     // GitHub Actions
     "GITHUB_*",
     "RUNNER_*",
+    "ACTIONS_ORCHESTRATION_ID",
     // https://docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-in-cloud-providers#using-custom-actions
     // ACTIONS_ID_TOKEN_REQUEST_TOKEN is covered by *_TOKEN below.
     "ACTIONS_ID_TOKEN_REQUEST_URL",

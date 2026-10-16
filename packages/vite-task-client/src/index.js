@@ -114,7 +114,9 @@ export function getEnv(name, options) {
  *
  * With `tracked: true` (the default) the runner records the pattern as a
  * dependency, so adding, removing, or changing a matching env invalidates
- * this run's cache entry.
+ * this run's cache entry. Names matching the task's `cache.untrackedEnv`
+ * patterns are still returned, but their values do not invalidate the cache.
+ * Use `getEnv` for an explicit dependency on one of those names.
  *
  * Has no effect on `process.env`; the caller decides what to do with the
  * returned values. Returns an empty object when not running inside a runner.

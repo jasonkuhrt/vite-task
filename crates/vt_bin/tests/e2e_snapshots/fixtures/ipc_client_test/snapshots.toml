@@ -670,3 +670,168 @@ steps = [
     ],
   ], comment = "cache hit: changed match set was requested with tracked: false" },
 ]
+
+[[e2e]]
+name = "fetch_envs_queries_ignore_untracked_names"
+comment = """
+Bulk glob and literal-prefix queries still serve untracked variables, but changing configured noise or the default ACTIONS_ORCHESTRATION_ID replays the cached result.
+"""
+ignore = true
+steps = [
+  { argv = [
+    "vt",
+    "run",
+    "fetch-envs-untracked-noise",
+  ], envs = [
+    [
+      "PROBE_A",
+      "a",
+    ],
+    [
+      "PROBE_NOISE_ID",
+      "run-1",
+    ],
+    [
+      "ACTIONS_ORCHESTRATION_ID",
+      "run-1",
+    ],
+  ], comment = "populate: the glob serves both tracked values and untracked noise" },
+  { argv = [
+    "vt",
+    "run",
+    "fetch-envs-untracked-noise",
+  ], envs = [
+    [
+      "PROBE_A",
+      "a",
+    ],
+    [
+      "PROBE_NOISE_ID",
+      "run-2",
+    ],
+    [
+      "ACTIONS_ORCHESTRATION_ID",
+      "run-2",
+    ],
+  ], comment = "cache hit: configured and default untracked values changed" },
+  { argv = [
+    "vt",
+    "run",
+    "fetch-envs-prefix-untracked-noise",
+  ], envs = [
+    [
+      "PROBE_A",
+      "a",
+    ],
+    [
+      "PROBE_NOISE_ID",
+      "run-1",
+    ],
+  ], comment = "populate: the literal-prefix query serves its untracked match too" },
+  { argv = [
+    "vt",
+    "run",
+    "fetch-envs-prefix-untracked-noise",
+  ], envs = [
+    [
+      "PROBE_A",
+      "a",
+    ],
+    [
+      "PROBE_NOISE_ID",
+      "run-2",
+    ],
+  ], comment = "cache hit: literal-prefix queries honor the same exclusion" },
+]
+
+[[e2e]]
+name = "fetch_envs_empty_prefix_preserves_negated_dependencies"
+comment = """
+An empty prefix queries every ambient variable. Negating VITE_* from untrackedEnv keeps its values, additions and removals as cache dependencies. Only VITE_* results are printed so platform-specific ambient values stay out of the snapshot.
+"""
+ignore = true
+steps = [
+  { argv = [
+    "vt",
+    "run",
+    "fetch-envs-all-untracked-except-vite",
+  ], envs = [
+    [
+      "VITE_FEATURE",
+      "first",
+    ],
+  ], comment = "populate: VITE_FEATURE is excluded from the untracked wildcard" },
+  { argv = [
+    "vt",
+    "run",
+    "fetch-envs-all-untracked-except-vite",
+  ], envs = [
+    [
+      "VITE_FEATURE",
+      "second",
+    ],
+  ], comment = "cache miss: a negated dependency changed" },
+  { argv = [
+    "vt",
+    "run",
+    "fetch-envs-all-untracked-except-vite",
+  ], envs = [
+    [
+      "VITE_FEATURE",
+      "second",
+    ],
+    [
+      "VITE_ADDED",
+      "added",
+    ],
+  ], comment = "cache miss: a negated dependency was added" },
+  { argv = [
+    "vt",
+    "run",
+    "fetch-envs-all-untracked-except-vite",
+  ], envs = [
+    [
+      "VITE_FEATURE",
+      "second",
+    ],
+  ], comment = "cache miss: a negated dependency was removed" },
+]
+
+[[e2e]]
+name = "fetch_env_explicit_read_overrides_untracked_config"
+comment = """
+An explicit tracked getEnv call remains a dependency even when the task declares the same name in untrackedEnv.
+"""
+ignore = true
+steps = [
+  { argv = [
+    "vt",
+    "run",
+    "fetch-env-explicitly-untracked",
+  ], envs = [
+    [
+      "PROBE_ENV",
+      "first",
+    ],
+  ], comment = "populate: getEnv explicitly records the otherwise untracked value" },
+  { argv = [
+    "vt",
+    "run",
+    "fetch-env-explicitly-untracked",
+  ], envs = [
+    [
+      "PROBE_ENV",
+      "first",
+    ],
+  ], comment = "cache hit: the explicit dependency is unchanged" },
+  { argv = [
+    "vt",
+    "run",
+    "fetch-env-explicitly-untracked",
+  ], envs = [
+    [
+      "PROBE_ENV",
+      "second",
+    ],
+  ], comment = "cache miss: an explicit getEnv read stays tracked" },
+]

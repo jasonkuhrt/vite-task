@@ -89,6 +89,30 @@
       "command": "node scripts/fetch_envs.mjs --prefix PROBE_*",
       "cache": true
     },
+    "fetch-envs-untracked-noise": {
+      "command": "node scripts/fetch_envs.mjs --glob \"{PROBE_*,ACTIONS_ORCHESTRATION_ID}\"",
+      "cache": {
+        "untrackedEnv": ["PROBE_NOISE_*"]
+      }
+    },
+    "fetch-envs-prefix-untracked-noise": {
+      "command": "node scripts/fetch_envs.mjs --prefix",
+      "cache": {
+        "untrackedEnv": ["PROBE_NOISE_*"]
+      }
+    },
+    "fetch-envs-all-untracked-except-vite": {
+      "command": "node scripts/fetch_envs.mjs --prefix \"\" --print-prefix VITE_",
+      "cache": {
+        "untrackedEnv": ["*", "!VITE_*"]
+      }
+    },
+    "fetch-env-explicitly-untracked": {
+      "command": "node scripts/fetch_env.mjs PROBE_ENV",
+      "cache": {
+        "untrackedEnv": ["PROBE_ENV"]
+      }
+    },
     "fetch-env-untracked": {
       "command": "node scripts/fetch_env.mjs --untracked PROBE_ENV",
       "cache": true
