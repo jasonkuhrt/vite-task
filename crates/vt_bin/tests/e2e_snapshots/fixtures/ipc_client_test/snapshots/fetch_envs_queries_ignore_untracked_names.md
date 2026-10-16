@@ -1,6 +1,6 @@
 # fetch_envs_queries_ignore_untracked_names
 
-Bulk glob and literal-prefix queries still serve untracked variables, but changing configured noise or the default ACTIONS_ORCHESTRATION_ID replays the cached result.
+Bulk glob and literal-prefix queries still serve explicitly ignored variables, but changing those values replays the cached result.
 
 ## `PROBE_A=a PROBE_NOISE_ID=run-1 ACTIONS_ORCHESTRATION_ID=run-1 vt run fetch-envs-untracked-noise`
 
@@ -15,7 +15,7 @@ PROBE_NOISE_ID=run-1
 
 ## `PROBE_A=a PROBE_NOISE_ID=run-2 ACTIONS_ORCHESTRATION_ID=run-2 vt run fetch-envs-untracked-noise`
 
-cache hit: configured and default untracked values changed
+cache hit: both explicitly ignored values changed
 
 ```
 $ node scripts/fetch_envs.mjs --glob "{PROBE_*,ACTIONS_ORCHESTRATION_ID}" ◉ cache hit, replaying

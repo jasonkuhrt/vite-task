@@ -143,8 +143,8 @@ impl PostRunFingerprint {
     /// unfiltered env context used by runner-aware IPC. `unfiltered_envs` must
     /// be the same plan env context that served the original `getEnv` request,
     /// not the filtered env passed to the spawned process.
-    /// Bulk queries omit `untrackedEnv` names from value comparisons. Explicit
-    /// single-name reads remain dependencies even when the name is untracked.
+    /// User-declared `untrackedEnv` patterns override both single-name and
+    /// bulk dependencies. Built-in passthrough defaults do not.
     ///
     /// Returns `Some(mismatch)` if anything changed, `None` if all valid.
     /// Returns an error if a tracked env is currently present but cannot be
@@ -155,7 +155,7 @@ impl PostRunFingerprint {
         &self,
         base_dir: &AbsolutePath,
         unfiltered_envs: &FxHashMap<EnvName<Arc<OsStr>>, Arc<OsStr>>,
-        untracked_env: &EnvGlobSet,
+        explicit_untracked_env: &[Str],
     ) -> anyhow::Result<Option<PostRunMismatch>> {
         let input_mismatch = self.inferred_inputs.par_iter().find_map_any(
             |(input_relative_path, path_fingerprint)| {
@@ -190,6 +190,11 @@ impl PostRunFingerprint {
             return result.map(Some);
         }
 
+        let has_env_reads = !self.tracked_envs.is_empty() || !self.tracked_env_queries.is_empty();
+        let untracked_env = (has_env_reads && !explicit_untracked_env.is_empty())
+            .then(|| EnvGlobSet::new(explicit_untracked_env))
+            .transpose()?;
+
         for (name, stored_value) in &self.tracked_envs {
             let current_value = unfiltered_envs
                 .get(EnvName::from_ref(OsStr::new(name.as_str())))
@@ -200,6 +205,9 @@ impl PostRunFingerprint {
                     Ok::<_, anyhow::Error>(EnvValueHash::new(value_str))
                 })
                 .transpose()?;
+            if untracked_env.as_ref().is_some_and(|patterns| patterns.is_match(name.as_str())) {
+                continue;
+            }
             if let Some(mismatch) =
                 EnvMismatch::compare(name, stored_value.as_ref(), current_value.as_ref())
             {
@@ -208,7 +216,7 @@ impl PostRunFingerprint {
         }
 
         for (query, stored_matches) in &self.tracked_env_queries {
-            let current_matches = match match_env_query(query, unfiltered_envs, untracked_env)? {
+            let current_matches = match match_env_query(query, unfiltered_envs)? {
                 EnvQueryValidation::Matches(matches) => matches,
                 EnvQueryValidation::NonUtf8Value(mismatch) => {
                     return Ok(Some(PostRunMismatch::TrackedEnvQuery {
@@ -217,14 +225,9 @@ impl PostRunFingerprint {
                     }));
                 }
             };
-            // Older entries can include untracked names. Apply the same policy
-            // to both sides so those entries can still be replayed.
-            let stored_matches = stored_matches
-                .iter()
-                .filter(|(name, _)| !untracked_env.is_match(name.as_str()))
-                .map(|(name, value)| (name.clone(), *value))
-                .collect();
-            if let Some(mismatch) = first_env_glob_mismatch(&stored_matches, &current_matches) {
+            if let Some(mismatch) =
+                first_env_glob_mismatch(stored_matches, &current_matches, untracked_env.as_ref())
+            {
                 return Ok(Some(PostRunMismatch::TrackedEnvQuery {
                     query: query.clone(),
                     mismatch,
@@ -242,25 +245,21 @@ impl PostRunFingerprint {
 fn match_env_query(
     query: &TrackedEnvQuery,
     envs: &FxHashMap<EnvName<Arc<OsStr>>, Arc<OsStr>>,
-    untracked_env: &EnvGlobSet,
 ) -> anyhow::Result<EnvQueryValidation> {
     Ok(match query {
         TrackedEnvQuery::Glob(pattern) => {
             let glob = vt_glob::env::EnvGlob::new(pattern.as_str())?;
-            collect_matching_envs(envs, |name| glob.is_match(name), untracked_env)
+            collect_matching_envs(envs, |name| glob.is_match(name))
         }
-        TrackedEnvQuery::Prefix(prefix) => collect_matching_envs(
-            envs,
-            |name| EnvName::from_ref(name).starts_with(prefix.as_str()),
-            untracked_env,
-        ),
+        TrackedEnvQuery::Prefix(prefix) => {
+            collect_matching_envs(envs, |name| EnvName::from_ref(name).starts_with(prefix.as_str()))
+        }
     })
 }
 
 fn collect_matching_envs(
     envs: &FxHashMap<EnvName<Arc<OsStr>>, Arc<OsStr>>,
     is_match: impl Fn(&str) -> bool,
-    untracked_env: &EnvGlobSet,
 ) -> EnvQueryValidation {
     let mut matches = BTreeMap::new();
     for (name, value) in envs {
@@ -275,11 +274,6 @@ fn collect_matching_envs(
                 name: Str::from(name_str),
             });
         };
-        // The client rejects non-UTF-8 values even for untracked names, so
-        // validate representation before omitting the value dependency.
-        if untracked_env.is_match(name_str) {
-            continue;
-        }
         matches.insert(Str::from(name_str), EnvValueHash::new(value_str));
     }
     EnvQueryValidation::Matches(matches)
@@ -295,9 +289,12 @@ enum EnvQueryValidation {
 fn first_env_glob_mismatch(
     stored: &BTreeMap<Str, EnvValueHash>,
     current: &BTreeMap<Str, EnvValueHash>,
+    untracked_env: Option<&EnvGlobSet>,
 ) -> Option<EnvMismatch> {
-    let mut stored_iter = stored.iter();
-    let mut current_iter = current.iter();
+    let is_tracked =
+        |name: &Str| !untracked_env.is_some_and(|patterns| patterns.is_match(name.as_str()));
+    let mut stored_iter = stored.iter().filter(|(name, _)| is_tracked(name));
+    let mut current_iter = current.iter().filter(|(name, _)| is_tracked(name));
     let mut s = stored_iter.next();
     let mut c = current_iter.next();
 
@@ -536,12 +533,8 @@ mod tests {
         OsString::from_wide(&[0xD800])
     }
 
-    fn no_untracked() -> EnvGlobSet {
-        EnvGlobSet::new(std::iter::empty::<&str>()).expect("empty patterns")
-    }
-
     #[test]
-    fn validate_ignores_untracked_values_in_older_bulk_query_entries() {
+    fn validate_applies_current_overrides_to_complete_bulk_query_entries() {
         for query in [TrackedEnvQuery::Glob(Str::from("*")), TrackedEnvQuery::Prefix(Str::from(""))]
         {
             let stored_matches = BTreeMap::from([
@@ -562,7 +555,7 @@ mod tests {
                     Arc::<OsStr>::from(OsStr::new("new-run")),
                 ),
             ]);
-            let untracked = EnvGlobSet::new(["ACTIONS_*"]).expect("valid patterns");
+            let untracked = [Str::from("ACTIONS_*")];
             let workspace_root = vt_path::current_dir().expect("cwd");
             assert!(
                 fingerprint
@@ -586,7 +579,7 @@ mod tests {
             EnvName::new(Arc::<OsStr>::from(OsStr::new("PROBE_NOISE"))),
             Arc::<OsStr>::from(non_utf8_os_string()),
         )]);
-        let untracked = EnvGlobSet::new(["PROBE_*"]).expect("valid patterns");
+        let untracked = [Str::from("PROBE_*")];
         let workspace_root = vt_path::current_dir().expect("cwd");
         assert!(matches!(
             fingerprint
@@ -610,7 +603,7 @@ mod tests {
 
         let workspace_root = vt_path::current_dir().expect("cwd");
         let err = fingerprint
-            .validate(&workspace_root, &unfiltered_envs, &no_untracked())
+            .validate(&workspace_root, &unfiltered_envs, &[])
             .expect_err("non-UTF-8 tracked env values must error");
 
         assert!(err.to_string().contains("tracked env value for PROBE_ENV is not valid UTF-8"));
@@ -631,7 +624,7 @@ mod tests {
 
         let workspace_root = vt_path::current_dir().expect("cwd");
         let mismatch = fingerprint
-            .validate(&workspace_root, &unfiltered_envs, &no_untracked())
+            .validate(&workspace_root, &unfiltered_envs, &[])
             .expect("validation succeeds");
 
         match mismatch {
@@ -667,7 +660,7 @@ mod tests {
 
         let workspace_root = vt_path::current_dir().expect("cwd");
         let mismatch = fingerprint
-            .validate(&workspace_root, &unfiltered_envs, &no_untracked())
+            .validate(&workspace_root, &unfiltered_envs, &[])
             .expect("validation succeeds");
 
         assert!(mismatch.is_none());
@@ -688,7 +681,7 @@ mod tests {
 
         let workspace_root = vt_path::current_dir().expect("cwd");
         let mismatch = fingerprint
-            .validate(&workspace_root, &unfiltered_envs, &no_untracked())
+            .validate(&workspace_root, &unfiltered_envs, &[])
             .expect("validation succeeds");
 
         assert!(mismatch.is_none());
@@ -708,7 +701,7 @@ mod tests {
 
         let workspace_root = vt_path::current_dir().expect("cwd");
         let mismatch = fingerprint
-            .validate(&workspace_root, &unfiltered_envs, &no_untracked())
+            .validate(&workspace_root, &unfiltered_envs, &[])
             .expect("validation succeeds");
 
         assert_eq!(mismatch.is_none(), cfg!(windows));
@@ -731,7 +724,7 @@ mod tests {
 
         let workspace_root = vt_path::current_dir().expect("cwd");
         let mismatch = fingerprint
-            .validate(&workspace_root, &unfiltered_envs, &no_untracked())
+            .validate(&workspace_root, &unfiltered_envs, &[])
             .expect("validation succeeds");
 
         assert_eq!(mismatch.is_none(), cfg!(windows));

@@ -5,7 +5,6 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use rustc_hash::FxHashSet;
 use tokio_util::sync::CancellationToken;
-use vt_glob::env::EnvGlobSet;
 use vt_path::{AbsolutePath, RelativePathBuf};
 use vt_plan::cache_metadata::{CacheMetadata, EnvValueHash};
 use vt_server::Reports;
@@ -283,7 +282,7 @@ fn collect_tracked_reports(
     reports
         .map(|reports| {
             let tracked_envs = collect_tracked_envs(reports, metadata)?;
-            let tracked_env_queries = collect_tracked_env_queries(reports, metadata)?;
+            let tracked_env_queries = collect_tracked_env_queries(reports)?;
             Ok::<_, anyhow::Error>((tracked_envs, tracked_env_queries))
         })
         .transpose()
@@ -347,14 +346,9 @@ fn collect_tracked_envs(
 }
 
 /// Select tool-reported bulk env query records to embed in the post-run
-/// fingerprint. `untrackedEnv` names remain visible to the tool but their
-/// values are not fingerprinted, just as for the spawned environment.
-fn collect_tracked_env_queries(
-    reports: &Reports,
-    metadata: &CacheMetadata,
-) -> anyhow::Result<TrackedEnvQueryValues> {
-    let untracked_env =
-        EnvGlobSet::new(metadata.spawn_fingerprint.env_fingerprints().untracked_env_config.iter())?;
+/// fingerprint. Keep complete observations so removing an `untrackedEnv`
+/// override can revalidate previously ignored dependencies.
+fn collect_tracked_env_queries(reports: &Reports) -> anyhow::Result<TrackedEnvQueryValues> {
     let mut tracked_env_queries = BTreeMap::new();
 
     for (query, record) in &reports.tracked_get_envs {
@@ -367,9 +361,6 @@ fn collect_tracked_env_queries(
             let value_str = value.to_str().ok_or_else(|| {
                 anyhow::anyhow!("tracked env match value for {name_str} is not valid UTF-8")
             })?;
-            if untracked_env.is_match(name_str) {
-                continue;
-            }
             matches.insert(Str::from(name_str), EnvValueHash::new(value_str));
         }
         let query = match query {

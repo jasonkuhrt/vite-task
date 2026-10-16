@@ -398,7 +398,7 @@ impl ExecutionCache {
         if let Some(cache_value) = self.get_by_cache_key(cache_key).await? {
             if let Some(mismatch) = cache_value.validate(
                 &cache_metadata.unfiltered_envs,
-                &cache_metadata.spawn_fingerprint.env_fingerprints().untracked_env_config,
+                &cache_metadata.explicit_untracked_env,
                 globbed_inputs,
                 workspace_root,
             )? {
@@ -448,7 +448,7 @@ impl ExecutionCache {
         let validate = |cache_value: &CacheEntryValue| {
             cache_value.validate(
                 &cache_metadata.unfiltered_envs,
-                &cache_metadata.spawn_fingerprint.env_fingerprints().untracked_env_config,
+                &cache_metadata.explicit_untracked_env,
                 globbed_inputs,
                 workspace_root,
             )

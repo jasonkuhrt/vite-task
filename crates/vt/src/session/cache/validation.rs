@@ -4,7 +4,6 @@ use std::{collections::BTreeMap, ffi::OsStr, sync::Arc};
 
 use rustc_hash::FxHashMap;
 use vt_casefold::EnvName;
-use vt_glob::env::EnvGlobSet;
 use vt_path::{AbsolutePath, RelativePathBuf};
 
 use super::{CacheEntryKey, CacheEntryValue, FingerprintMismatch, InputChangeKind};
@@ -21,7 +20,7 @@ impl CacheEntryValue {
     pub(crate) fn validate(
         &self,
         unfiltered_envs: &FxHashMap<EnvName<Arc<OsStr>>, Arc<OsStr>>,
-        untracked_env_config: &[vt_str::Str],
+        explicit_untracked_env: &[vt_str::Str],
         globbed_inputs: &BTreeMap<RelativePathBuf, u64>,
         workspace_root: &AbsolutePath,
     ) -> anyhow::Result<Option<FingerprintMismatch>> {
@@ -29,9 +28,8 @@ impl CacheEntryValue {
             return Ok(Some(mismatch));
         }
 
-        let untracked_env = EnvGlobSet::new(untracked_env_config)?;
         self.post_run_fingerprint
-            .validate(workspace_root, unfiltered_envs, &untracked_env)
+            .validate(workspace_root, unfiltered_envs, explicit_untracked_env)
             .map(|mismatch| mismatch.map(FingerprintMismatch::from))
     }
 }
