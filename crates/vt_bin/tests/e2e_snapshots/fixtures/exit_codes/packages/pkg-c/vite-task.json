@@ -1,0 +1,41 @@
+{
+  "tasks": {
+    "keep-going": {
+      "command": "vtt print should not run",
+      "dependsOn": ["failing", "independent-1", "independent-2"]
+    },
+    "setup": {
+      "command": "vtt exit 0"
+    },
+    "failing": {
+      "command": "vtt barrier ../../.barrier sync 2 --exit=42"
+    },
+    "independent-1": {
+      "command": "vtt barrier ../../.barrier sync 3",
+      "dependsOn": ["setup"],
+      "cache": { "input": [], "output": [] }
+    },
+    "independent-2": {
+      "command": "vtt barrier ../../.barrier sync 3",
+      "dependsOn": ["setup"],
+      "cache": { "input": [], "output": [] }
+    },
+    "two-failures": {
+      "command": "vtt print should not run",
+      "dependsOn": ["fail-3", "fail-5"]
+    },
+    "fail-3": {
+      "command": "vtt exit 3"
+    },
+    "fail-5": {
+      "command": "vtt exit 5"
+    },
+    "nested": {
+      "command": "vt run fail-3"
+    },
+    "after-nested": {
+      "command": "vtt print should not run",
+      "dependsOn": ["nested"]
+    }
+  }
+}

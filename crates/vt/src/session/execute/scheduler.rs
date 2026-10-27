@@ -55,14 +55,17 @@ struct ExecutionContext<'a> {
     /// Public-facing program name (e.g. `vp`), used in user-facing error
     /// messages that suggest a CLI command (e.g. `cache clean`).
     program_name: &'a str,
-    /// Token cancelled when a task fails. Kills in-flight child processes
-    /// (via `start_kill` in spawn.rs).
+    /// Token cancelled when a task fails, unless `continue_on_failure` is
+    /// set. Kills in-flight child processes (via `start_kill` in spawn.rs).
     fast_fail_token: CancellationToken,
     /// Token cancelled by Ctrl-C, and by fast-fail as a child of
     /// `fast_fail_token`. Prevents scheduling new tasks and caching results,
     /// and stops remote cache lookups. On Ctrl-C, running processes are
     /// left to handle SIGINT naturally.
     cancel_token: CancellationToken,
+    /// Set by `--continue`. A failed task doesn't cancel `fast_fail_token`, so
+    /// other tasks keep running and being scheduled. Its dependents don't start.
+    continue_on_failure: bool,
 }
 
 impl ExecutionContext<'_> {
@@ -83,10 +86,16 @@ impl ExecutionContext<'_> {
     /// (killing in-flight child processes). Ctrl-C cancels the `cancel_token`.
     /// Either cancellation causes this method to close the semaphore, drain
     /// remaining futures, and return.
+    ///
+    /// With `--continue`, a failure cancels nothing. A failed node doesn't
+    /// release its dependents, so they never start, and every other node
+    /// still runs.
+    ///
+    /// Returns whether any node in the graph failed.
     #[tracing::instrument(level = "debug", skip_all)]
-    async fn execute_expanded_graph(&self, graph: &ExecutionGraph) {
+    async fn execute_expanded_graph(&self, graph: &ExecutionGraph) -> bool {
         if graph.graph.node_count() == 0 {
-            return;
+            return false;
         }
 
         let semaphore =
@@ -111,11 +120,21 @@ impl ExecutionContext<'_> {
         // Process completions and schedule newly ready dependents.
         // On failure, `execute_leaf` cancels the token — we detect it here, close
         // the semaphore (so pending acquires fail immediately), and drain.
-        while let Some(completed_ix) = futures.next().await {
+        let mut any_failed = false;
+        while let Some((completed_ix, failed)) = futures.next().await {
+            any_failed |= failed;
             if self.cancelled() {
                 semaphore.close();
-                while futures.next().await.is_some() {}
-                return;
+                while let Some((_, failed)) = futures.next().await {
+                    any_failed |= failed;
+                }
+                return any_failed;
+            }
+
+            // A failed node doesn't release its dependents, so their counts
+            // never reach zero.
+            if failed {
+                continue;
             }
 
             // Find dependents of the completed node (nodes that depend on it).
@@ -129,62 +148,75 @@ impl ExecutionContext<'_> {
                 }
             }
         }
+        any_failed
     }
 
     /// Create a future that acquires a semaphore permit, then executes a graph node.
     ///
-    /// On failure, `execute_node` cancels the `fast_fail_token` — the caller
-    /// detects this after the future completes. On semaphore closure or prior
-    /// cancellation, the node is skipped.
+    /// The future resolves to the node and whether it failed. Without
+    /// `--continue`, a failure has also cancelled the `fast_fail_token` — the
+    /// caller detects this after the future completes. On semaphore closure or
+    /// prior cancellation, the node is skipped and doesn't count as failed.
     fn spawn_node<'a>(
         &'a self,
         graph: &'a ExecutionGraph,
         node_ix: ExecutionNodeIndex,
         semaphore: &Arc<Semaphore>,
-    ) -> LocalBoxFuture<'a, ExecutionNodeIndex> {
+    ) -> LocalBoxFuture<'a, (ExecutionNodeIndex, bool)> {
         let sem = semaphore.clone();
         async move {
-            if let Ok(_permit) = sem.acquire_owned().await
+            let failed = if let Ok(_permit) = sem.acquire_owned().await
                 && !self.cancelled()
             {
-                self.execute_node(graph, node_ix).await;
-            }
-            node_ix
+                self.execute_node(graph, node_ix).await
+            } else {
+                false
+            };
+            (node_ix, failed)
         }
         .boxed_local()
     }
 
-    /// Execute a single node's items sequentially.
+    /// Execute a single node's items sequentially, returning whether one failed.
     ///
     /// A node may have multiple items (from `&&`-split commands). Items are executed
-    /// in order; if any item fails, `execute_leaf` cancels the `fast_fail_token`
-    /// and remaining items are skipped (preserving `&&` semantics).
-    async fn execute_node(&self, graph: &ExecutionGraph, node_ix: ExecutionNodeIndex) {
+    /// in order; if any item fails, remaining items are skipped (preserving `&&`
+    /// semantics). An `Expanded` item fails if any node in its nested graph fails.
+    async fn execute_node(&self, graph: &ExecutionGraph, node_ix: ExecutionNodeIndex) -> bool {
         let task_execution = &graph.graph[node_ix];
 
         for item in &task_execution.items {
             if self.cancelled() {
-                return;
+                return false;
             }
-            match &item.kind {
+            let failed = match &item.kind {
                 ExecutionItemKind::Leaf(leaf_kind) => {
-                    self.execute_leaf(&item.execution_item_display, leaf_kind).boxed_local().await;
+                    self.execute_leaf(&item.execution_item_display, leaf_kind).boxed_local().await
                 }
                 ExecutionItemKind::Expanded(nested_graph) => {
-                    self.execute_expanded_graph(nested_graph).boxed_local().await;
+                    self.execute_expanded_graph(nested_graph).boxed_local().await
                 }
+            };
+            if failed {
+                return true;
             }
         }
+        false
     }
 
     /// Execute a single leaf item (in-process command or spawned process).
     ///
     /// Creates a [`LeafExecutionReporter`](crate::session::reporter::LeafExecutionReporter)
     /// from the graph reporter and delegates to the appropriate execution
-    /// method. On failure (non-zero exit or infrastructure error), cancels the
-    /// `fast_fail_token`.
+    /// method. Returns whether the leaf failed (non-zero exit or infrastructure
+    /// error). On failure, cancels the `fast_fail_token` unless
+    /// `continue_on_failure` is set.
     #[tracing::instrument(level = "debug", skip_all)]
-    async fn execute_leaf(&self, display: &ExecutionItemDisplay, leaf_kind: &LeafExecutionKind) {
+    async fn execute_leaf(
+        &self,
+        display: &ExecutionItemDisplay,
+        leaf_kind: &LeafExecutionKind,
+    ) -> bool {
         // Borrow the reporter briefly to create the leaf reporter, then drop
         // the RefCell guard before any `.await` point.
         let mut leaf_reporter = self.reporter.borrow_mut().new_leaf_execution(display, leaf_kind);
@@ -226,9 +258,10 @@ impl ExecutionContext<'_> {
                 }
             }
         };
-        if failed {
+        if failed && !self.continue_on_failure {
             self.fast_fail_token.cancel();
         }
+        failed
     }
 }
 
@@ -239,7 +272,8 @@ impl Session<'_> {
     /// after cache initialization, so cache errors are reported directly to stderr
     /// without involving the reporter at all.
     ///
-    /// `fast_fail_token` and `cancel_token` are described on [`ExecutionContext`].
+    /// `fast_fail_token`, `cancel_token` and `continue_on_failure` are described
+    /// on [`ExecutionContext`].
     ///
     /// Uploads to the remote cache run in the background and can outlive
     /// their tasks. Once the graph is done, this waits for them before the
@@ -257,6 +291,7 @@ impl Session<'_> {
         fast_fail_token: CancellationToken,
         cancel_token: CancellationToken,
         interrupt_token: CancellationToken,
+        continue_on_failure: bool,
     ) -> Result<(), ExitStatus> {
         // Initialize cache before building the reporter. Cache errors are reported
         // directly to stderr and cause an early exit, keeping the reporter flow clean
@@ -280,10 +315,13 @@ impl Session<'_> {
             program_name: self.program_name.as_str(),
             fast_fail_token,
             cancel_token,
+            continue_on_failure,
         };
 
         // Execute the graph with fast-fail: if any task fails, remaining tasks
-        // are skipped. Leaf-level errors are reported through the reporter.
+        // are skipped. With `--continue`, only the failed tasks' dependents are.
+        // Leaf-level errors are reported through the reporter, which also
+        // decides the exit status, so whether a task failed isn't needed here.
         execution_context.execute_expanded_graph(&execution_graph).await;
 
         // Nested graphs share the cache, so this waits for their uploads too.

@@ -57,6 +57,13 @@ pub struct RunFlags {
     #[clap(default_value = "false", long)]
     pub ignore_depends_on: bool,
 
+    /// Keep running other tasks after a task fails.
+    ///
+    /// Tasks that depend on a failed task don't run, and the run still exits
+    /// with a non-zero code.
+    #[clap(default_value = "false", long = "continue")]
+    pub continue_on_failure: bool,
+
     /// Show full detailed summary after execution.
     #[clap(default_value = "false", short = 'v', long)]
     pub verbose: bool,

@@ -292,6 +292,10 @@ impl<'a> Session<'a> {
     /// # Panics
     ///
     /// Panics if parsing a hardcoded bare `RunCommand` fails (should never happen).
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the run arm plans, builds the reporters and sets up cancellation in sequence"
+    )]
     async fn main_inner(&mut self, command: Command) -> Result<(), SessionError> {
         match command.into_resolved() {
             ResolvedCommand::Cache { ref subcmd } => self.handle_cache_command(subcmd),
@@ -428,9 +432,16 @@ impl<'a> Session<'a> {
                     it.cancel();
                 })?;
 
-                self.execute_graph(graph, builder, fast_fail_token, cancel_token, interrupt_token)
-                    .await
-                    .map_err(SessionError::EarlyExit)
+                self.execute_graph(
+                    graph,
+                    builder,
+                    fast_fail_token,
+                    cancel_token,
+                    interrupt_token,
+                    run_command.flags.continue_on_failure,
+                )
+                .await
+                .map_err(SessionError::EarlyExit)
             }
         }
     }
