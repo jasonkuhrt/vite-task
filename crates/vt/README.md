@@ -34,7 +34,8 @@ port, URL scheme, status code and error class; they contain no endpoint path,
 query, request headers, cache keys, bodies or error source messages.
 
 `OTEL_SDK_DISABLED=true` or `OTEL_TRACES_EXPORTER=none` turns export off even
-when an endpoint is set. Exporter setup and flush failures leave task outcomes
-unchanged and report a diagnostic without configuration values. A session
-drains its batch exporter before returning its status, including when a task
-fails or the command exits early.
+when an endpoint is set. Exporter initialization failures and errors returned
+by the SDK at shutdown leave task outcomes unchanged and emit a warning
+without configuration values. Before returning its status, a session calls
+the SDK's shutdown to drain pending batches, including when a task fails or
+the command exits early.

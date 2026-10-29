@@ -20,7 +20,8 @@ impl Telemetry {
             .any(|name| env::var_os(name).is_some_and(|value| !value.is_empty()));
         if !configured
             || env::var("OTEL_SDK_DISABLED").is_ok_and(|value| value.eq_ignore_ascii_case("true"))
-            || env::var("OTEL_TRACES_EXPORTER").is_ok_and(|value| value == "none")
+            || env::var("OTEL_TRACES_EXPORTER")
+                .is_ok_and(|value| value.eq_ignore_ascii_case("none"))
         {
             return None;
         }

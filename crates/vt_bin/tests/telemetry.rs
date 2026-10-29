@@ -16,7 +16,7 @@ fn session_flushes_on_success_and_failure_and_honors_export_opt_outs() {
         ("success", "check", None, true),
         ("failure", "fail", None, false),
         ("sdk_disabled", "check", Some(("OTEL_SDK_DISABLED", "true")), true),
-        ("exporter_none", "check", Some(("OTEL_TRACES_EXPORTER", "none")), true),
+        ("exporter_none", "check", Some(("OTEL_TRACES_EXPORTER", "NONE")), true),
     ] {
         let directory = workspace();
 
