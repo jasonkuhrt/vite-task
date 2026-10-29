@@ -191,7 +191,7 @@ impl Client {
     pub fn with_tracer<T>(mut self, tracer: T) -> Self
     where
         T: Tracer + Send + Sync + 'static,
-        T::Span: Send + Sync,
+        T::Span: Send + Sync + 'static,
     {
         self.tracer = Some(Arc::new(BoxedTracer::new(Box::new(tracer))));
         self
@@ -213,7 +213,13 @@ impl Client {
     pub async fn fetch(&self, key: &[u8], secondary_key: &[u8]) -> Result<Option<Fetched>, Error> {
         let mut headers = self.auth_headers(Operation::Fetch).await?;
         let body = encode_cbor(&FetchRequest { key, secondary_key });
-        let span = RequestSpan::start(&self.tracer, "POST", "fetch", &self.fetch_url, &mut headers);
+        let span = RequestSpan::start(
+            self.tracer.as_deref(),
+            "POST",
+            "fetch",
+            &self.fetch_url,
+            &mut headers,
+        );
         let result = async {
             let response = self
                 .http
@@ -252,7 +258,7 @@ impl Client {
         let mut url = self.blob_url.clone();
         url.path_segments_mut().map_err(|()| Error::InvalidEndpoint(None))?.push(blob_id);
         let mut headers = self.auth_headers(Operation::Download).await?;
-        let span = RequestSpan::start(&self.tracer, "GET", "blob", &url, &mut headers);
+        let span = RequestSpan::start(self.tracer.as_deref(), "GET", "blob", &url, &mut headers);
         let result = async {
             let response =
                 self.http.get(url).headers(headers).send().await.map_err(network_error)?;
@@ -290,7 +296,13 @@ impl Client {
         if let Some(blob) = blob {
             form = form.part("blob", blob_part(blob).await?);
         }
-        let span = RequestSpan::start(&self.tracer, "POST", "store", &self.store_url, &mut headers);
+        let span = RequestSpan::start(
+            self.tracer.as_deref(),
+            "POST",
+            "store",
+            &self.store_url,
+            &mut headers,
+        );
         let result = async {
             let response = self
                 .http

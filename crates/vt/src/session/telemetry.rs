@@ -31,13 +31,10 @@ impl Telemetry {
             .ok()
             .and_then(|thread| thread.join().ok())
             .and_then(Result::ok);
-        match built {
-            Some(telemetry) => Some(telemetry),
-            None => {
-                tracing::warn!("could not initialize remote cache OpenTelemetry export");
-                None
-            }
+        if built.is_none() {
+            tracing::warn!("could not initialize remote cache OpenTelemetry export");
         }
+        built
     }
 
     fn build() -> Result<Self, opentelemetry_otlp::ExporterBuildError> {

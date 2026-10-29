@@ -1,7 +1,5 @@
 //! HTTP client spans and W3C context propagation for cache operations.
 
-use std::sync::Arc;
-
 use opentelemetry::{
     Context, KeyValue,
     global::BoxedTracer,
@@ -17,17 +15,17 @@ use crate::Error;
 
 /// Owns a span until the operation (including a streamed body) finishes.
 #[derive(Debug)]
-pub(super) struct RequestSpan(Context);
+pub struct RequestSpan(Context);
 
 impl RequestSpan {
     pub(super) fn start(
-        tracer: &Option<Arc<BoxedTracer>>,
+        tracer: Option<&BoxedTracer>,
         method: &'static str,
         route: &'static str,
         url: &Url,
         headers: &mut HeaderMap,
     ) -> Option<Self> {
-        let tracer = tracer.as_ref()?;
+        let tracer = tracer?;
         // Only transport metadata is recorded. Endpoint paths, queries,
         // credentials, cache keys and request/response bodies stay out.
         let mut attributes = vec![
@@ -84,6 +82,7 @@ impl RequestSpan {
         if let (Some(span), Err(error)) = (&span, &result) {
             span.error(error);
         }
+        drop(span);
         result
     }
 }

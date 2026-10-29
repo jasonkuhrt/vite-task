@@ -18,26 +18,7 @@ fn session_flushes_on_success_and_failure_and_honors_export_opt_outs() {
         ("sdk_disabled", "check", Some(("OTEL_SDK_DISABLED", "true")), true),
         ("exporter_none", "check", Some(("OTEL_TRACES_EXPORTER", "none")), true),
     ] {
-        let directory = tempfile::tempdir().unwrap();
-        std::fs::write(directory.path().join("package.json"), br#"{"name":"traced-cache"}"#)
-            .unwrap();
-        std::fs::write(
-            directory.path().join("vite-task.json"),
-            json!({
-                "tasks": {
-                    "check": {
-                        "command": "vtt print checked",
-                        "cache": {"input": [], "output": []}
-                    },
-                    "fail": {
-                        "command": "vtt exit 1", "cache": false,
-                        "dependsOn": ["check"]
-                    }
-                }
-            })
-            .to_string(),
-        )
-        .unwrap();
+        let directory = workspace();
 
         let cache = TcpListener::bind("127.0.0.1:0").unwrap();
         let cache_url =
@@ -127,6 +108,29 @@ fn session_flushes_on_success_and_failure_and_honors_export_opt_outs() {
         let spans = resource["scopeSpans"][0]["spans"].as_array().unwrap();
         assert_eq!(spans.len(), 2, "{case}: fetch and store were flushed");
     }
+}
+
+fn workspace() -> tempfile::TempDir {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("package.json"), br#"{"name":"traced-cache"}"#).unwrap();
+    std::fs::write(
+        directory.path().join("vite-task.json"),
+        json!({
+            "tasks": {
+                "check": {
+                    "command": "vtt print checked",
+                    "cache": {"input": [], "output": []}
+                },
+                "fail": {
+                    "command": "vtt exit 1", "cache": false,
+                    "dependsOn": ["check"]
+                }
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    directory
 }
 
 /// Read a complete request and return a small HTTP response. Both the cache

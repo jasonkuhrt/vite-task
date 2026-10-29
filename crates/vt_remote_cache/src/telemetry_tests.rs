@@ -40,27 +40,8 @@ async fn exports_cache_requests_with_their_propagated_identity_and_no_secrets() 
     std::thread::spawn(move || {
         export_tx.send(serve_once(&collector, "HTTP/1.1 200 OK", b"{}")).unwrap();
     });
-    let provider = tokio::task::spawn_blocking(move || {
-        let exporter = SpanExporter::builder()
-            .with_http()
-            .with_endpoint(collector_url.to_string())
-            .with_protocol(Protocol::HttpJson)
-            .build()
-            .unwrap();
-        let processor = BatchSpanProcessor::builder(exporter)
-            .with_batch_config(
-                BatchConfigBuilder::default()
-                    .with_scheduled_delay(std::time::Duration::from_secs(60))
-                    .build(),
-            )
-            .build();
-        SdkTracerProvider::builder()
-            .with_span_processor(processor)
-            .with_resource(Resource::builder_empty().with_service_name("cache-client-test").build())
-            .build()
-    })
-    .await
-    .unwrap();
+    let provider =
+        tokio::task::spawn_blocking(move || collector_provider(&collector_url)).await.unwrap();
     let client = Client::new(&endpoint, Arc::new(Anonymous))
         .unwrap()
         .with_tracer(provider.tracer("cache-client-test"));
@@ -134,4 +115,22 @@ async fn exports_cache_requests_with_their_propagated_identity_and_no_secrets() 
         assert_eq!(span["status"]["code"].as_i64().unwrap_or(0) == 2, failed);
         assert_ne!(span["endTimeUnixNano"], "0");
     }
+}
+
+fn collector_provider(endpoint: &str) -> SdkTracerProvider {
+    let exporter = SpanExporter::builder()
+        .with_http()
+        .with_endpoint(endpoint.to_owned())
+        .with_protocol(Protocol::HttpJson)
+        .build()
+        .unwrap();
+    let processor = BatchSpanProcessor::builder(exporter)
+        .with_batch_config(
+            BatchConfigBuilder::default().with_scheduled_delay(Duration::from_secs(60)).build(),
+        )
+        .build();
+    SdkTracerProvider::builder()
+        .with_span_processor(processor)
+        .with_resource(Resource::builder_empty().with_service_name("cache-client-test").build())
+        .build()
 }
