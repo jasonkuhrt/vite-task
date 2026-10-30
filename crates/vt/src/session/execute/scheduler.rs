@@ -55,17 +55,20 @@ struct ExecutionContext<'a> {
     /// Public-facing program name (e.g. `vp`), used in user-facing error
     /// messages that suggest a CLI command (e.g. `cache clean`).
     program_name: &'a str,
-    /// Token cancelled when a task fails, unless `continue_on_failure` is
-    /// set. Kills in-flight child processes (via `start_kill` in spawn.rs).
+    /// Token cancelled when a task fails in a graph without `--continue`.
+    /// Kills in-flight child processes (via `start_kill` in spawn.rs).
+    ///
+    /// One token serves every nested graph, and graphs with `--continue`
+    /// obey it too. That matches cancelling each graph on its own because a
+    /// nested `--continue` can't be turned off: a graph without it has no
+    /// ancestor with it, so its failure would cancel every graph up to the
+    /// root anyway.
     fast_fail_token: CancellationToken,
     /// Token cancelled by Ctrl-C, and by fast-fail as a child of
     /// `fast_fail_token`. Prevents scheduling new tasks and caching results,
     /// and stops remote cache lookups. On Ctrl-C, running processes are
     /// left to handle SIGINT naturally.
     cancel_token: CancellationToken,
-    /// Set by `--continue`. A failed task doesn't cancel `fast_fail_token`, so
-    /// other tasks keep running and being scheduled. Its dependents don't start.
-    continue_on_failure: bool,
 }
 
 impl ExecutionContext<'_> {
@@ -82,14 +85,14 @@ impl ExecutionContext<'_> {
     /// `concurrency_limit` permits. Each recursive `Expanded` graph creates its own
     /// semaphore, so nested graphs have independent concurrency limits.
     ///
-    /// Fast-fail: if any task fails, `execute_leaf` cancels the `fast_fail_token`
-    /// (killing in-flight child processes). Ctrl-C cancels the `cancel_token`.
+    /// Fast-fail: if a node fails, this cancels the `fast_fail_token` (killing
+    /// in-flight child processes). Ctrl-C cancels the `cancel_token`.
     /// Either cancellation causes this method to close the semaphore, drain
     /// remaining futures, and return.
     ///
-    /// With `--continue`, a failure cancels nothing. A failed node doesn't
-    /// release its dependents, so they never start, and every other node
-    /// still runs.
+    /// If the graph has `continue_on_failure` (`--continue`), a failure cancels
+    /// nothing. A failed node doesn't release its dependents, so they never
+    /// start, and every other node still runs.
     ///
     /// Returns whether any node in the graph failed.
     #[tracing::instrument(level = "debug", skip_all)]
@@ -118,11 +121,16 @@ impl ExecutionContext<'_> {
         }
 
         // Process completions and schedule newly ready dependents.
-        // On failure, `execute_leaf` cancels the token — we detect it here, close
-        // the semaphore (so pending acquires fail immediately), and drain.
+        // On failure without `--continue`, cancel the token here rather than in
+        // `execute_leaf`, so a nested `--continue` graph that failed also stops
+        // this one. Then close the semaphore (so pending acquires fail
+        // immediately) and drain.
         let mut any_failed = false;
         while let Some((completed_ix, failed)) = futures.next().await {
             any_failed |= failed;
+            if failed && !graph.continue_on_failure {
+                self.fast_fail_token.cancel();
+            }
             if self.cancelled() {
                 semaphore.close();
                 while let Some((_, failed)) = futures.next().await {
@@ -153,9 +161,8 @@ impl ExecutionContext<'_> {
 
     /// Create a future that acquires a semaphore permit, then executes a graph node.
     ///
-    /// The future resolves to the node and whether it failed. Without
-    /// `--continue`, a failure has also cancelled the `fast_fail_token` — the
-    /// caller detects this after the future completes. On semaphore closure or
+    /// The future resolves to the node and whether it failed; the caller then
+    /// decides whether the failure cancels the run. On semaphore closure or
     /// prior cancellation, the node is skipped and doesn't count as failed.
     fn spawn_node<'a>(
         &'a self,
@@ -209,8 +216,11 @@ impl ExecutionContext<'_> {
     /// Creates a [`LeafExecutionReporter`](crate::session::reporter::LeafExecutionReporter)
     /// from the graph reporter and delegates to the appropriate execution
     /// method. Returns whether the leaf failed (non-zero exit or infrastructure
-    /// error). On failure, cancels the `fast_fail_token` unless
-    /// `continue_on_failure` is set.
+    /// error); the graph decides whether that cancels the run.
+    ///
+    /// A spawn gets a child of the `fast_fail_token`: fast-fail still kills
+    /// it, and when the spawn cancels the token to kill its own process (after
+    /// failing to forward its output), other tasks keep running.
     #[tracing::instrument(level = "debug", skip_all)]
     async fn execute_leaf(
         &self,
@@ -221,7 +231,7 @@ impl ExecutionContext<'_> {
         // the RefCell guard before any `.await` point.
         let mut leaf_reporter = self.reporter.borrow_mut().new_leaf_execution(display, leaf_kind);
 
-        let failed = match leaf_kind {
+        match leaf_kind {
             LeafExecutionKind::InProcess(in_process_execution) => {
                 // In-process (built-in) commands: caching is disabled, execute synchronously
                 let mut stdio_config = leaf_reporter
@@ -247,7 +257,7 @@ impl ExecutionContext<'_> {
                     self.workspace_root,
                     self.cache_dir,
                     self.program_name,
-                    self.fast_fail_token.clone(),
+                    self.fast_fail_token.child_token(),
                     self.cancel_token.clone(),
                 )
                 .await;
@@ -257,11 +267,7 @@ impl ExecutionContext<'_> {
                     SpawnOutcome::Failed => true,
                 }
             }
-        };
-        if failed && !self.continue_on_failure {
-            self.fast_fail_token.cancel();
         }
-        failed
     }
 }
 
@@ -272,8 +278,7 @@ impl Session<'_> {
     /// after cache initialization, so cache errors are reported directly to stderr
     /// without involving the reporter at all.
     ///
-    /// `fast_fail_token`, `cancel_token` and `continue_on_failure` are described
-    /// on [`ExecutionContext`].
+    /// `fast_fail_token` and `cancel_token` are described on [`ExecutionContext`].
     ///
     /// Uploads to the remote cache run in the background and can outlive
     /// their tasks. Once the graph is done, this waits for them before the
@@ -291,7 +296,6 @@ impl Session<'_> {
         fast_fail_token: CancellationToken,
         cancel_token: CancellationToken,
         interrupt_token: CancellationToken,
-        continue_on_failure: bool,
     ) -> Result<(), ExitStatus> {
         // Initialize cache before building the reporter. Cache errors are reported
         // directly to stderr and cause an early exit, keeping the reporter flow clean
@@ -315,13 +319,13 @@ impl Session<'_> {
             program_name: self.program_name.as_str(),
             fast_fail_token,
             cancel_token,
-            continue_on_failure,
         };
 
         // Execute the graph with fast-fail: if any task fails, remaining tasks
-        // are skipped. With `--continue`, only the failed tasks' dependents are.
-        // Leaf-level errors are reported through the reporter, which also
-        // decides the exit status, so whether a task failed isn't needed here.
+        // are skipped. In graphs with `--continue`, only the failed tasks'
+        // dependents are. Leaf-level errors are reported through the reporter,
+        // which also decides the exit status, so whether a task failed isn't
+        // needed here.
         execution_context.execute_expanded_graph(&execution_graph).await;
 
         // Nested graphs share the cache, so this waits for their uploads too.
